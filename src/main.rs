@@ -1,12 +1,13 @@
-mod ui;
+mod app;
 mod tui;
-mod components;
+mod ui;
 
 use std::path::PathBuf;
+use app::App;
 use clap::Parser;
 use tasd_lib::{Serializable, TASD};
 use color_eyre::Result;
-use crate::ui::App;
+use crossterm::event::{self, Event, KeyEventKind};
 
 /// A CLI interface to read and write TASD files, and to send them to a TAStm32.
 #[derive(Parser, Debug)]
@@ -17,21 +18,51 @@ struct Args {
     file: PathBuf,
 }
 
-
 fn main() -> Result<()> {
-    let args = Args::parse();
-    let content = std::fs::read(&args.file).expect("could not read file");
-    let tasd = TASD::deserialize(&content).expect("could not deserialize file");
-
+    // Initialize color_eyre for better error reporting
     color_eyre::install()?;
+
+    // Parse command line arguments
+    let args = Args::parse();
+
+    // Read and parse TASD file - fix lifetime issue by cloning the content
+    let content = std::fs::read(&args.file)?;
+    let (_, tasd) = TASD::deserialize(&content).map_err(|e| color_eyre::eyre::eyre!("Failed to parse TASD file: {:?}", e))?;
+
+    // Initialize application state
+    let app = App::new(tasd, args.file);
+
+    // Run the application using TUI
+    run(app)
+}
+
+fn run(mut app: App) -> Result<()> {
+    // Setup terminal
     let mut terminal = tui::init()?;
 
-    let result = App::new(tasd.1).run(&mut terminal);
+    // Main event loop
+    while !app.exit {
+        // Draw UI - pass mutable reference to app
+        terminal.draw(|frame| ui::components::render(&mut app, frame))?;
+
+        // Handle events
+        match event::read()? {
+            // It's important to check that the event is a key press event as
+            // crossterm also emits key release and repeat events on Windows.
+            Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
+                app.handle_key_event(key_event)?;
+            }
+            _ => {}
+        }
+    }
+
+    // Restore terminal
     if let Err(err) = tui::restore() {
         eprintln!(
-            "failed to restore terminal. Run `reset` or restart your terminal to recover: {}",
+            "Failed to restore terminal: Run `reset` or restart your terminal to recover: {}",
             err
         );
     }
-    result
+
+    Ok(())
 }
